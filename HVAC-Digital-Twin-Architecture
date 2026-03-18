@@ -1,0 +1,1209 @@
+# Platforma Digital Twin dla HVAC – Architektura Rozwiązania
+
+**Dokument:** Architektura techniczna, komponenty, flow danych i plan MVP  
+**Data:** Marzec 2026  
+**Status:** Draft – do pracy z Claude Code  
+**Zespół:** HellCold sp. z o.o. – BIM Specialists & HVAC Installers  
+
+---
+
+## 1. Przegląd rozwiązania
+
+### 1.1. Cel platformy
+
+Platforma Digital Twin dla klientów kupujących urządzenia HVAC (klimatyzatory Daikin + kompleksowe instalacje). Funkcjonalności:
+- **Live monitoring:** stan urządzeń (temperatura, tryb, alarmy) w real-time z viewerem 3D (model BIM + chmura punktów).
+- **Historia serwisowa:** powiązanie alertów, Case'ów (Dynamics 365 Customer Service) i dokumentacji z konkretnym urządzeniem.
+- **Diagnostyka:** proste reguły FDD (Fault Detection & Diagnostics), wskaźniki energetyczne.
+- **Integracja:** Daikin Onecta, BMS (Modbus/BACnet via gateway), IBM watsonx.ai (opcjonalnie dla ML).
+
+### 1.2. Podejście architektoniczne
+
+**Infrastruktura own-hosted** (Docker Compose na serwerze w kolokacji PL) dla pełnej kontroli, niskich kosztów i niezależności od pojedynczego cloud providera:
+- **Core:** backend (NestJS), DB (PostgreSQL HA), IoT (MQTT + ThingsBoard), frontend (React).
+- **Integracje:** Daikin Onecta API (polling), BMS gateway (MQTT), Dynamics 365 Customer Service (REST/OData).
+- **Viewer:** xeokit dla IFC/XKT (modele BIM), Potree/LAZ support (chmury punktów).
+- **Koszt:** ~150–300 PLN/mies. kolokacja + minimalne Azure (~20 USD) dla Dynamics API = tańsze i niezależne.
+
+### 1.3. Stack technologiczny
+
+| Warstwa | Technologia | Uzasadnienie |
+|---------|------------|-----|
+| **Frontend** | React 18 + Next.js 15 (App Router) + TypeScript | SPA szybka, TypeScript dla Claire Code, SSR opcjonalnie |
+| **Backend** | NestJS + Express (TypeScript) | Modularny, łatwy z ClaudeCode, async/await, Swagger |
+| **IoT/Telemetria** | ThingsBoard CE (Docker) + EMQX MQTT broker | Multi-tenant z pudełka, rules engine, device mgmt |
+| **DB – config** | PostgreSQL 16 HA (pg_auto_failover) | Relacyjne dane (devices, users, assets), HA za darmo |
+| **DB – telemetry** | TimeSeries w Postgres (partycje) / TimescaleDB | Dla dużych wolumenów; na MVP Postgres wystarczy |
+| **Reverse proxy** | Traefik v3 + Let's Encrypt | Auto-discovery Docker labels, HTTPS, rate-limiting |
+| **3D Viewer** | xeokit SDK (TypeScript) + Potree (point clouds) | Open-source, pełna kontrola, IFC/XKT/LAS/LAZ |
+| **External – CRM** | Dynamics 365 Customer Service (Cloud Microsoft) | Cases, Assets; integracja via OData REST |
+| **Container** | Docker Compose | Łatwy deploy, development == production |
+
+---
+
+## 2. Architektura systemu
+
+### 2.1. Diagram wysokopoziomowy
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                          INTERNET                               │
+├─────────────────────────────────────────────────────────────────┤
+│
+│  ┌────────────────────────────────────────────────────────┐
+│  │         CLIENTS (Browser)                              │
+│  │  - Klienci (view devices, alerts, docs)                │
+│  │  - Serwis (dashboard fleet, planowanie)                │
+│  └──────────────────────┬─────────────────────────────────┘
+│                         │ HTTPS
+│                         ▼
+│  ┌─────────────────────────────────────────────────────────┐
+│  │     TRAEFIK REVERSE PROXY (80/443 + Let's Encrypt)     │
+│  │     Auto-discovery Docker labels, SSL termination      │
+│  └─────┬──────────────────────────────────────────────────┘
+│        │
+│  ┌─────┴──────────────────────────────────────────────────┐
+│  │          OWN SERVER (Kolokacja PL)                     │
+│  │          Docker Compose Stack                          │
+│  │                                                        │
+│  │  ┌─────────────────────────────────────────────────┐  │
+│  │  │ FRONTEND (React SPA)                            │  │
+│  │  │ - Dashboard, DeviceDetail, BIM Viewer           │  │
+│  │  │ - xeokit integration, telemetry overlay         │  │
+│  │  │ Port: 3000 (nginx)                              │  │
+│  │  └─────────────────────────────────────────────────┘  │
+│  │                         │                              │
+│  │  ┌─────────────────────┴──────────────────────────┐  │
+│  │  │ BACKEND API (NestJS)                           │  │
+│  │  │ ├── AuthModule (JWT, tenant isolation)         │  │
+│  │  │ ├── DevicesModule (sync TB)                    │  │
+│  │  │ ├── TelemetryModule (query TB)                 │  │
+│  │  │ ├── DataverseModule (OData → D365 CS)          │  │
+│  │  │ ├── ViewerModule (IFC/XKT files)               │  │
+│  │  │ └── IntegrationModule (Daikin, BMS, etc.)      │  │
+│  │  │ Port: 3001 (NestJS)                            │  │
+│  │  └─────┬──────────────────────────────────────────┘  │
+│  │        │                                              │
+│  │  ┌─────┴────────────────────────────────────────────┐ │
+│  │  │ IoT CORE (ThingsBoard + EMQX MQTT)              │ │
+│  │  │                                                  │ │
+│  │  │ ThingsBoard:                                     │ │
+│  │  │ ├── Multi-tenant (tenant per client)            │ │
+│  │  │ ├── Devices (DaikinSplit, ModbusSensor, etc.)   │ │
+│  │  │ ├── Rules engine (threshold → alarms)           │ │
+│  │  │ ├── Telemetry storage (TS)                      │ │
+│  │  │ └── REST API (:8080)                            │ │
+│  │  │                                                  │ │
+│  │  │ EMQX MQTT Broker (:1883/:8883 TLS)              │ │
+│  │  │ ├── ACL per tenant                              │ │
+│  │  │ ├── Retains device state                        │ │
+│  │  │ └── Topics: tenant/{id}/device/{id}/telemetry   │ │
+│  │  └─────┬──────────────────────────────────────────┘  │
+│  │        │                                              │
+│  │  ┌─────┴──────────────────────────────────────────┐  │
+│  │  │ DATA LAYER                                     │  │
+│  │  │                                                │  │
+│  │  │ PostgreSQL 16 HA (pg_auto_failover):           │  │
+│  │  │ ├── config: users, devices, installations,     │  │
+│  │  │ │   client mappings, documents                 │  │
+│  │  │ ├── telemetry: time-series (partycje), TS      │  │
+│  │  │ ├── thingsboard: TB's own schema               │  │
+│  │  │ │   (assets, devices, telemetry)               │  │
+│  │  │ └── backups: automated snapshots               │  │
+│  │  │                                                │  │
+│  │  │ File Storage (Volume):                         │  │
+│  │  │ ├── IFC/XKT models                             │  │
+│  │  │ ├── DTR/dokumentacja (PDF)                     │  │
+│  │  │ └── Point clouds (E57 → LAZ → Potree)          │  │
+│  │  └────────────────────────────────────────────────┘  │
+│  │                                                       │
+│  └───────────────────────────────────────────────────────┘
+│
+│  ┌────────────────────────────────────────────────────────┐
+│  │ EXTERNAL INTEGRATIONS (HTTPS/REST)                    │
+│  │                                                        │
+│  │ • Daikin Onecta Cloud API (polling scheduler)          │
+│  │   └─ Schedule: co 2–5 min (zależnie od SLA)           │
+│  │   └─ Publish: tenant/{id}/device/{id}/telemetry       │
+│  │                                                        │
+│  │ • BMS Gateway (MQTT over TLS)                          │
+│  │   └─ On-site: Modbus/BACnet → MQTT client            │
+│  │   └─ Topics: tenant/{id}/device/{id}/telemetry       │
+│  │                                                        │
+│  │ • Dynamics 365 Customer Service (OData REST)           │
+│  │   └─ Create Case z alertu (Power Automate flow)       │
+│  │   └─ Update Case status → Dataverse                   │
+│  │                                                        │
+│  │ • IBM watsonx.ai (REST, opcjonalnie)                  │
+│  │   └─ Send telemetry batches → ML/FDD predictions      │
+│  │   └─ Result: alarms, recommendations                  │
+│  │                                                        │
+│  └────────────────────────────────────────────────────────┘
+```
+
+### 2.2. Flow danych – przykład end-to-end (Daikin split)
+
+```
+1. POLLING (Backend scheduler)
+   ├─ Co 3 min: GET /api.onecta.com/v1/devices?accessToken
+   └─ Zwraca: temp (actual/target), mode, power, errorCode
+
+2. PUBLIKACJA MQTT (NestJS → ThingsBoard)
+   ├─ Topic: tenant/client_001/device/split_01/telemetry
+   ├─ Payload: { temperature: 22.5, setpoint: 23, mode: "cool", errorCode: 0 }
+   └─ Via ThingsBoard HTTP/MQTT API (REST publish)
+
+3. INGESTION (ThingsBoard)
+   ├─ MQTT message ingestion
+   ├─ Save to telemetry (time-series storage)
+   └─ Trigger rules engine
+
+4. RULES ENGINE (ThingsBoard)
+   ├─ Condition: temp > 30 for 10 min
+   ├─ Action: Create alarm "High temperature"
+   └─ Webhook: POST /api/backend/alerts (notify backend)
+
+5. ALERT HANDLING (NestJS backend)
+   ├─ Receive webhook → validate tenant
+   ├─ Store alert (alert_id, severity, timestamp)
+   ├─ OPTIONAL: Call Dynamics API → create Case
+   └─ OPTIONAL: watsonx.ai → check if anomaly
+
+6. UI (Frontend React)
+   ├─ GET /api/clients/{id}/devices
+   ├─ GET /api/alerts?limit=20
+   ├─ WebSocket: live telemetry updates (optional: sub MQTT via WS bridge)
+   └─ Render: dashboard + BIM viewer (xeokit) overlay status
+
+7. HISTORY (Dataverse Customer Service)
+   ├─ Case created (Alert → Case via Power Automate)
+   ├─ Case status tracked
+   └─ Display in frontend: "linked to Case XYZ"
+```
+
+### 2.3. Multi-tenancy
+
+**Architektura:** Logical multi-tenancy (single DB, shared resources, tenant_id column everywhere)
+
+- **Isolacja:** Filtrowanie na poziomie API (Query filters), middleware @Tenant() guard w NestJS.
+- **ThingsBoard tenants:** Każdy klient = jeden tenant w TB (separate customer portal).
+- **MQTT ACL:** EMQX kontroluje dostęp: user `tenant_001_gateway` ma dostęp tylko do `tenant/client_001/**`.
+- **Dataverse:** Każdy klient ma własny Account/Contact; relatywnie odseparowane Cases.
+
+---
+
+## 3. Komponenty – szczegóły techniczne
+
+### 3.1. Frontend (React + xeokit)
+
+**Stack:**
+- Next.js 15 (App Router) + TypeScript + React 18
+- Tailwind CSS + shadcn/ui components
+- @xeokit/xeokit-sdk (3D BIM viewer)
+- axios (API client)
+- zustand (state management, opcjonalnie Redux)
+
+**Struktura:**
+```
+frontend/
+├── app/
+│   ├── (auth)/
+│   │   ├── login/page.tsx
+│   │   └── register/page.tsx
+│   ├── (dashboard)/
+│   │   ├── layout.tsx (sidebar, nav)
+│   │   ├── page.tsx (ClientDashboard)
+│   │   ├── devices/
+│   │   │   └── [id]/page.tsx (DeviceDetail + xeokit)
+│   │   └── alerts/page.tsx
+│   └── api/ (optional proxy routes)
+├── components/
+│   ├── XeokitViewer.tsx (core viewer, load IFC + overlay telemetry)
+│   ├── DeviceCard.tsx
+│   ├── AlertsList.tsx
+│   └── DocumentationPanel.tsx
+├── lib/
+│   ├── api.ts (axios instance + endpoints)
+│   ├── auth.ts (JWT handling)
+│   └── types.ts (models: Device, Telemetry, Alert)
+├── Dockerfile
+├── docker-compose.yml (frontend serwowany nginx)
+└── package.json
+```
+
+**Kluczowe komponenty:**
+
+1. **XeokitViewer** – osadzony viewer (props: modelUrl: string, deviceId: string)
+   - Load model: `viewer.scene.load(modelUrl)`
+   - Overlay: GET `/api/devices/{id}/telemetry` → highlight geometry, show param in panel
+   - Interact: click element → show device info + alert history
+
+2. **DeviceDetail** – strona `/device/[id]`
+   - Lewo: xeokit viewer
+   - Prawo: live metrics + alerts + linked Cases + DTR/documentation
+
+3. **ClientDashboard** – overview wszystkich instalacji/urządzeń
+   - Fleet view: lista clients/sites → devices
+   - Kolorowanie: status (OK/warning/alarm)
+   - Filter: site, device type, SLA status
+
+### 3.2. Backend (NestJS)
+
+**Stack:**
+- NestJS (TypeScript framework)
+- Express adapter
+- TypeORM (Postgres ORM)
+- axios (HTTP client)
+- Swagger (API documentation)
+- Bull (job queue, OPTIONAL: dla heavy async tasks)
+- @azure/identity + @microsoft/microsoft-graph-client (Dataverse auth)
+
+**Struktura:**
+```
+backend/
+├── src/
+│   ├── auth/
+│   │   ├── auth.module.ts
+│   │   ├── auth.service.ts (JWT, refresh tokens)
+│   │   ├── auth.guard.ts (@Tenant() decorator)
+│   │   └── dto/
+│   │       ├── login.dto.ts
+│   │       └── register.dto.ts
+│   │
+│   ├── thingsboard/
+│   │   ├── thingsboard.module.ts
+│   │   ├── thingsboard.service.ts (TB REST API client)
+│   │   ├── dto/
+│   │   │   ├── device.dto.ts
+│   │   │   └── telemetry.dto.ts
+│   │   └── thingsboard.controller.ts
+│   │
+│   ├── devices/
+│   │   ├── devices.module.ts
+│   │   ├── devices.service.ts
+│   │   ├── devices.controller.ts
+│   │   ├── entities/
+│   │   │   ├── device.entity.ts (DB model)
+│   │   │   └── device-config.entity.ts
+│   │   └── dto/
+│   │       ├── create-device.dto.ts
+│   │       └── update-device.dto.ts
+│   │
+│   ├── telemetry/
+│   │   ├── telemetry.module.ts
+│   │   ├── telemetry.service.ts (query TB, aggregate)
+│   │   ├── telemetry.controller.ts
+│   │   └── dto/telemetry-query.dto.ts
+│   │
+│   ├── alerts/
+│   │   ├── alerts.module.ts
+│   │   ├── alerts.service.ts
+│   │   ├── alerts.controller.ts
+│   │   ├── webhook.handler.ts (webhooks z TB)
+│   │   └── entities/alert.entity.ts
+│   │
+│   ├── integrations/
+│   │   ├── daikin/ (Onecta API client)
+│   │   │   ├── daikin.service.ts
+│   │   │   └── daikin.scheduler.ts
+│   │   │
+│   │   ├── dataverse/ (D365 OData client)
+│   │   │   ├── dataverse.service.ts
+│   │   │   ├── case.service.ts
+│   │   │   └── entities-mapper.ts
+│   │   │
+│   │   └── bms/ (BACnet/Modbus MQTT adapter config)
+│   │       ├── bms.service.ts
+│   │       └── mqtt-client.ts
+│   │
+│   ├── viewer/
+│   │   ├── viewer.module.ts
+│   │   ├── viewer.service.ts (file upload, IFC→XKT conversion)
+│   │   ├── viewer.controller.ts
+│   │   └── xeokit-converter/ (CLI wrapper)
+│   │
+│   ├── clients/
+│   │   ├── clients.module.ts
+│   │   ├── clients.service.ts
+│   │   ├── clients.controller.ts
+│   │   └── entities/client.entity.ts
+│   │
+│   ├── common/
+│   │   ├── decorators/
+│   │   │   ├── tenant.decorator.ts (@Tenant())
+│   │   │   └── auth.decorator.ts (@Auth())
+│   │   ├── guards/
+│   │   │   ├── jwt.guard.ts
+│   │   │   └── tenant.guard.ts
+│   │   ├── interceptors/
+│   │   │   ├── tenant.interceptor.ts (add tenant_id to queries)
+│   │   │   └── error.interceptor.ts
+│   │   └── filters/
+│   │       └── http-exception.filter.ts
+│   │
+│   ├── app.module.ts (root module)
+│   ├── app.controller.ts (health, metrics)
+│   └── main.ts
+│
+├── docker/Dockerfile
+├── docker-compose.yml
+├── ormconfig.json (TypeORM config)
+├── .env.example
+├── package.json
+└── README.md
+```
+
+**Kluczowe serwisy:**
+
+1. **ThingsBoardService**
+   ```typescript
+   // Ping TB REST API, query devices, publish telemetry, get alarms
+   async getDevicesByTenant(tenantId: string): Promise<Device[]>
+   async publishTelemetry(tenantId: string, deviceId: string, data: any)
+   async getAlarmsByTenant(tenantId: string): Promise<Alarm[]>
+   ```
+
+2. **DaikinService** (scheduler)
+   ```typescript
+   // Cron job: co 3 minuty poll Onecta API dla każdego klienta
+   @Cron('0 */3 * * * *')
+   async syncDaikinDevices()
+   ```
+
+3. **DataverseService** (OData client)
+   ```typescript
+   // Create/update Cases w D365 Customer Service
+   async createCase(tenantId: string, alert: Alert): Promise<string> // zwraca Case ID
+   async getCasesByAsset(assetId: string): Promise<Case[]>
+   ```
+
+4. **ViewerService** (BIM)
+   ```typescript
+   // Upload IFC → convert to XKT via xeokit-convert CLI
+   async uploadAndConvertModel(file: Express.Multer.File): Promise<{ xktPath: string }>
+   ```
+
+### 3.3. IoT Core – ThingsBoard + EMQX
+
+#### ThingsBoard (Docker)
+```yaml
+# docker-compose.yml fragment
+thingsboard:
+  image: thingsboard/tb-ce:latest
+  container_name: thingsboard
+  volumes:
+    - ./data/thingsboard:/data
+    - ./init-thingsboard.sh:/init-thingsboard.sh
+  environment:
+    - DATABASE_TS_TYPE=postgresql
+    - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/thingsboard
+    - SPRING_DATASOURCE_USERNAME=${DB_USER}
+    - SPRING_DATASOURCE_PASSWORD=${DB_PASSWORD}
+    - MQTT_ENABLED=true
+  ports:
+    - "8080:8080"  # HTTP API (internal)
+    - "1883:1883"  # MQTT plain (internal)
+  depends_on:
+    - postgres
+```
+
+**Konfiguracja ThingsBoard:**
+- **Tenants:** import via API (system admin creates tenant per client)
+- **Device types:** DaikinSplit, ModbusSensor, BACnetNode (templates z properties)
+- **Rules Engine:** MQTT ingest → save telemetry → threshold rules → alarms
+- **Webhook integration:** POST `http://backend:3001/webhook/alert` (trigger alerts w backendzie)
+
+#### EMQX MQTT Broker
+```yaml
+# docker-compose.yml fragment
+emqx:
+  image: emqx/emqx:5.6
+  container_name: emqx
+  ports:
+    - "1883:1883"  # MQTT
+    - "8883:8883"  # MQTT TLS
+    - "18083:18083"  # Dashboard
+  environment:
+    - EMQX_DEFAULT_USER=admin
+    - EMQX_DEFAULT_PASSWORD=${MQTT_PASSWORD}
+  volumes:
+    - ./config/emqx/acl.conf:/opt/emqx/etc/acl.conf
+    - ./config/emqx/emqx.conf:/opt/emqx/etc/emqx.conf
+```
+
+**ACL (access control list):**
+```conf
+# ACL per tenant
+{allow, {user, "tenant_001_daikin"}, subscribe, ["tenant/client_001/+/+/telemetry"]}.
+{allow, {user, "tenant_001_daikin"}, publish, ["tenant/client_001/+/+/telemetry"]}.
+{allow, {user, "tenant_001_bms"}, subscribe, ["tenant/client_001/+/+/telemetry"]}.
+{allow, {user, "tenant_001_bms"}, publish, ["tenant/client_001/+/+/telemetry"]}.
+```
+
+**Topics convention:**
+- `tenant/{clientId}/device/{deviceId}/telemetry` – readings (read/write)
+- `tenant/{clientId}/device/{deviceId}/commands` – commands to device (write)
+- `tenant/{clientId}/device/{deviceId}/status` – device online/offline (read)
+
+### 3.4. Database – PostgreSQL HA
+
+**HA setup (pg_auto_failover):**
+```yaml
+# docker-compose.yml
+postgres:
+  image: postgres:16-alpine
+  container_name: postgres-primary
+  volumes:
+    - ./data/postgres:/var/lib/postgresql/data
+    - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql
+  environment:
+    - POSTGRES_USER=${DB_USER}
+    - POSTGRES_PASSWORD=${DB_PASSWORD}
+    - POSTGRES_DB=thingsboard  # TB uses same DB
+  ports:
+    - "5432:5432"
+
+postgres-replica:  # Optional: dla HA (replica)
+  image: postgres:16-alpine
+  # ...similar config, different port
+```
+
+**Schematy (TypeORM):**
+
+1. **config** schema (Twoja app)
+   - `users` (email, tenant_id, role: admin/user/guest, passwordHash)
+   - `clients` (name, contact, subscription_tier, created_at)
+   - `sites` (client_id, location, address, bim_model_id)
+   - `devices` (site_id, name, type: DaikinSplit/ModbusSensor, external_id: TB device UUID, config: JSON)
+   - `documents` (device_id, type: DTR/manual/schematic, file_path, upload_date)
+   - `alerts` (device_id, severity, message, timestamp, is_resolved)
+
+2. **thingsboard** schema (TB handles)
+   - TB's own tables: devices, device_relations, telemetry, attributes, alarms, etc.
+
+3. **telemetry** schema (time-series)
+   - `telemetry_events` (device_id, metric_name, value, timestamp) – partycje Monthly by device_id
+   - Opcjonalnie: TimescaleDB hypertable zamiast manual partycji
+
+**Backups:** `pg_dump` cron + rsync do Azure Blob / Backblaze B2 (~5 PLN/mies.).
+
+### 3.5. Reverse Proxy – Traefik
+
+```yaml
+# docker-compose.yml + traefik/traefik.yml
+traefik:
+  image: traefik:v3.6
+  container_name: traefik
+  ports:
+    - "80:80"
+    - "443:443"
+  volumes:
+    - /var/run/docker.sock:/var/run/docker.sock:ro
+    - ./traefik/traefik.yml:/traefik.yml:ro
+    - ./traefik/dynamic.yml:/dynamic.yml:ro
+    - ./certs/acme.json:/acme.json
+  command:
+    - "--api.dashboard=true"
+    - "--providers.docker=true"
+    - "--providers.docker.exposedbydefault=false"
+    - "--providers.file.filename=/dynamic.yml"
+    - "--entrypoints.web.address=:80"
+    - "--entrypoints.websecure.address=:443"
+    - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+    - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+    - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+    - "--certificatesresolvers.letsencrypt.acme.storage=/acme.json"
+  labels:
+    - "traefik.enable=true"
+    - "traefik.http.routers.dashboard.rule=Host(`traefik.yourdomain.pl`)"
+    - "traefik.http.routers.dashboard.service=api@internal"
+    - "traefik.http.services.dashboard.loadbalancer.server.port=8080"
+```
+
+**Routers (auto-discovery via Docker labels):**
+- `app.yourdomain.pl` → frontend (React)
+- `api.yourdomain.pl` → backend (NestJS:3001)
+- `tb.yourdomain.pl` → ThingsBoard (8080)
+- `mqtt.yourdomain.pl:8883` → EMQX TLS
+
+---
+
+## 4. Integracje zewnętrzne
+
+### 4.1. Daikin Onecta API
+
+**Flow:**
+1. Backend scheduler (NestJS Cron): co 3–5 min
+2. Dla każdego klienta: GET auth token (OAuth2 refresh) z bazy
+3. GET `/v1/devices?accessToken` → lista device IDs
+4. GET `/v1/device/{id}` → current state (temp, mode, setpoint, error)
+5. Publish MQTT: `tenant/{clientId}/device/{daikin_xxx}/telemetry`
+6. ThingsBoard ingests → rules → alarms
+
+**Serwis (NestJS):**
+```typescript
+// daikin.service.ts
+@Injectable()
+export class DaikinService {
+  @Cron('0 */5 * * * *')  // co 5 min
+  async syncAllClients() {
+    const clients = await this.clientsService.findAll();
+    for (const client of clients) {
+      await this.syncClientDevices(client.id);
+    }
+  }
+
+  async syncClientDevices(clientId: string) {
+    const cred = await this.secretsService.getDaikinCreds(clientId);
+    const token = await this.refreshToken(cred.refreshToken);
+    const devices = await this.daikinApi.listDevices(token);
+    
+    for (const dev of devices) {
+      const state = await this.daikinApi.getDeviceState(dev.id, token);
+      await this.mqttClient.publish(
+        `tenant/${clientId}/device/${dev.id}/telemetry`,
+        JSON.stringify({
+          temperature: state.indoorTemperature,
+          setpoint: state.targetTemperature,
+          mode: state.operationMode,
+          errorCode: state.errorCode,
+          timestamp: new Date().toISOString(),
+        })
+      );
+    }
+  }
+}
+```
+
+**Secrets (env vars + .env file):**
+```
+DAIKIN_CLIENT_ID=xxx
+DAIKIN_CLIENT_SECRET=yyy
+DAIKIN_REDIRECT_URI=https://api.yourdomain.pl/oauth/daikin/callback
+```
+
+### 4.2. BMS Gateway (own-hosted)
+
+**On-site:** mini-PC/RPi w obiekcie z:
+- Modbus RTU master (RS-485) / BACnet/IP scanner
+- MQTT client (publikuje do Waszego brokera TLS)
+- Python script lub Node app (polling registers, normalizacja)
+
+**Example Python gateway:**
+```python
+# bms-gateway.py (runs on RPi at site)
+import paho.mqtt.client as mqtt
+from pyModbusTCP.client import ModbusClient
+
+SITE_ID = "site_001"
+TENANT_ID = "client_001"
+MQTT_BROKER = "mqtt.yourdomain.pl"
+MQTT_USER = "tenant_001_bms"
+MQTT_PASSWORD = "..."
+
+modbus = ModbusClient(host='192.168.1.10', port=502)
+mqtt_client = mqtt.Client()
+mqtt_client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
+mqtt_client.connect(MQTT_BROKER, 8883, keepalive=60)
+
+while True:
+    # Read Modbus registers
+    regs = modbus.read_holding_registers(0, 10)
+    data = {
+        "temp_supply": regs[0] / 100,
+        "temp_return": regs[1] / 100,
+        "pump_flow": regs[2],
+    }
+    # Publish to MQTT
+    mqtt_client.publish(
+        f"tenant/{TENANT_ID}/device/bms_01/telemetry",
+        json.dumps(data)
+    )
+    time.sleep(60)  # co minutę
+```
+
+**Dostarczenie:** Docker image lub systemd service. Konfiguracja: env vars + config.json (mapping registers).
+
+### 4.3. Dynamics 365 Customer Service Integration
+
+**Flow:**
+1. ThingsBoard alert webhook → NestJS POST `/webhook/alert`
+2. NestJS stores alert + checks if critical
+3. If yes: OData API call → create Case w Dataverse
+4. Case linked do Asset (device)
+5. Frontend shows Case info: status, assigned_to, resolution
+
+**Serwis (NestJS):**
+```typescript
+// dataverse.service.ts
+@Injectable()
+export class DataverseService {
+  private async getAccessToken(): Promise<string> {
+    const cred = new ClientSecretCredential(
+      process.env.AZURE_TENANT_ID,
+      process.env.AZURE_CLIENT_ID,
+      process.env.AZURE_CLIENT_SECRET
+    );
+    const token = await cred.getToken(`${process.env.D365_ORG_URI}/.default`);
+    return token.token;
+  }
+
+  async createCase(alert: Alert, assetId: string): Promise<string> {
+    const token = await this.getAccessToken();
+    const caseData = {
+      title: `Alert: ${alert.message}`,
+      description: `Device: ${alert.deviceId}\nSeverity: ${alert.severity}`,
+      msdyn_priority: alert.severity === 'critical' ? 1 : 2,
+      incidentid: assetId,  // link to Asset
+    };
+    
+    const response = await axios.post(
+      `${process.env.D365_ORG_URI}/api/data/v9.2/incidents`,
+      caseData,
+      { headers: { Authorization: `Bearer ${token}`, ...headers } }
+    );
+    return response.data.incidentid;
+  }
+}
+```
+
+**Power Automate flow (optional):**
+- Trigger: Case created in Customer Service
+- Action: Send notification to serwis team via Teams/email
+
+---
+
+## 5. Viewer – xeokit + Potree
+
+### 5.1. IFC → XKT conversion
+
+**Backend:**
+```typescript
+// viewer.service.ts
+import { execSync } from 'child_process';
+import { createReadStream } from 'fs';
+
+@Injectable()
+export class ViewerService {
+  async uploadAndConvertModel(file: Express.Multer.File, siteId: string): Promise<string> {
+    const ifcPath = `/tmp/${file.originalname}`;
+    const xktPath = `/data/models/${siteId}/${file.originalname.replace('.ifc', '.xkt')}`;
+    
+    // Save IFC
+    fs.writeFileSync(ifcPath, file.buffer);
+    
+    // Convert: ifc → xkt (using xeokit's convert2xkt CLI)
+    execSync(`npx @xeokit/xeokit-convert ${ifcPath} ${xktPath}`, {
+      stdio: 'inherit'
+    });
+    
+    // Store reference in DB
+    await this.modelRepository.save({
+      siteId,
+      name: file.originalname,
+      xktPath,
+      uploadDate: new Date(),
+    });
+    
+    return xktPath;
+  }
+}
+```
+
+### 5.2. Frontend – xeokit viewer component
+
+```typescript
+// components/XeokitViewer.tsx
+import React, { useEffect, useRef } from 'react';
+import { Viewer } from '@xeokit/xeokit-sdk';
+import { XKTLoaderPlugin } from '@xeokit/xeokit-sdk/dist/plugins/XKTLoaderPlugin/XKTLoaderPlugin.js';
+
+interface XeokitViewerProps {
+  modelUrl: string;
+  deviceId?: string;
+  telemetry?: Record<string, number>;
+}
+
+export function XeokitViewer({ modelUrl, deviceId, telemetry }: XeokitViewerProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const viewerRef = useRef<Viewer | null>(null);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    // Initialize viewer
+    viewerRef.current = new Viewer({
+      canvasElement: containerRef.current,
+    });
+
+    // Load XKT model
+    const xkt = new XKTLoaderPlugin(viewerRef.current);
+    xkt.load(`/models/${modelUrl}`, (err?: any) => {
+      if (!err) {
+        viewerRef.current?.scene.setStandardView(); // zoom fit
+      }
+    });
+
+    // If deviceId provided: highlight device entity
+    if (deviceId && viewerRef.current) {
+      const entity = viewerRef.current.scene.objects[deviceId];
+      if (entity) {
+        entity.highlighted = true;
+      }
+    }
+
+    return () => {
+      viewerRef.current?.destroy();
+    };
+  }, [modelUrl, deviceId]);
+
+  return (
+    <div className="flex h-full">
+      <div ref={containerRef} style={{ width: '70%', height: '100%' }} />
+      <div style={{ width: '30%', padding: '1rem', borderLeft: '1px solid #ccc' }}>
+        {telemetry && (
+          <div>
+            <h3>Live Data</h3>
+            {Object.entries(telemetry).map(([key, value]) => (
+              <div key={key}>{key}: {value}</div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+```
+
+### 5.3. Point clouds (Potree + LAZ)
+
+**Optional (MVP phase 2):**
+- E57 → LAZ conversion (external tool lub service)
+- Potree viewer osadzony w React (osobny panel)
+- Synchronizacja: click w BIM → highlight w point cloud (georeference)
+
+---
+
+## 6. Deployment & Infrastructure
+
+### 6.1. Server setup (Kolokacja PL)
+
+1. **Serwer:** Dell/HP z Xeonem 8 core, 32 GB RAM, 500 GB SSD (np. Netia/Hostersi, 150–300 PLN/mies.)
+2. **OS:** Ubuntu 24.04 LTS, Docker + Docker Compose
+3. **Network:** Firewall otwarte: 80 (HTTP), 443 (HTTPS), 1883 (MQTT internal)
+4. **SSL:** Let's Encrypt (Traefik auto-renew)
+5. **Backup:** `pg_dump` daily → Azure Blob Storage (10 GB @ 5 PLN/mies.)
+
+### 6.2. Docker Compose
+
+```yaml
+version: '3.9'
+
+services:
+  traefik:
+    # ... (see section 3.5)
+  
+  postgres:
+    # ... (see section 3.4)
+  
+  emqx:
+    # ... (see section 3.3)
+  
+  thingsboard:
+    # ... (see section 3.3)
+  
+  backend:
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile
+    container_name: backend
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/config
+      - THINGSBOARD_URL=http://thingsboard:8080
+      - MQTT_BROKER_URL=mqtt://emqx:1883
+      - DATAVERSE_ORG_URI=${D365_ORG_URI}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET}
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID}
+      - DAIKIN_CLIENT_ID=${DAIKIN_CLIENT_ID}
+      - DAIKIN_CLIENT_SECRET=${DAIKIN_CLIENT_SECRET}
+    ports:
+      - "3001:3001"
+    depends_on:
+      - postgres
+      - emqx
+      - thingsboard
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend.rule=Host(`api.yourdomain.pl`)"
+      - "traefik.http.routers.backend.entrypoints=websecure"
+      - "traefik.http.services.backend.loadbalancer.server.port=3001"
+  
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: docker/Dockerfile
+    container_name: frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`app.yourdomain.pl`)"
+      - "traefik.http.routers.frontend.entrypoints=websecure"
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
+
+volumes:
+  postgres_data:
+  thingsboard_data:
+  models_storage:
+
+networks:
+  default:
+    name: hvac-network
+```
+
+### 6.3. CI/CD (GitHub Actions)
+
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Build Docker images
+        run: |
+          docker build -t backend:${{ github.sha }} ./backend
+          docker build -t frontend:${{ github.sha }} ./frontend
+      
+      - name: Deploy to production
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ubuntu
+          key: ${{ secrets.DEPLOY_KEY }}
+          script: |
+            cd /opt/hvac-dt
+            docker-compose pull
+            docker-compose up -d
+```
+
+---
+
+## 7. Bezpieczeństwo & Compliance
+
+### 7.1. Zabezpieczenia sieciowe
+
+- **MQTT TLS:** port 8883 z certyfikatami (Let's Encrypt lub self-signed dla internal)
+- **API Auth:** JWT tokens (access/refresh), HS256 lub RS256
+- **CORS:** backend zezwala tylko `app.yourdomain.pl`
+- **Rate limiting:** Traefik middleware (max 100 req/min per IP)
+- **SQL Injection:** TypeORM + parameterized queries
+- **CSRF:** SameSite cookies (Next.js defaults)
+
+### 7.2. Data isolation (multi-tenant)
+
+- **Row-level security:** Postgres RLS opcjonalnie dla extra layer
+- **Middleware @Tenant():** każdy request musi mieć tenant_id (verify JWT claim)
+- **Audit trail:** log wszystkich zmian (alert created, case updated, user logged in)
+
+### 7.3. RODO compliance
+
+- **Data residency:** wszystko on-premise (Polska kolokacja) – zero danych w chmurze (poza Dynamics/Azure AD)
+- **Data retention:** konfigurowalne retention policies (telemetry 90 dni, alerts 1 rok)
+- **Data export/deletion:** API endpoints do export danych klienta lub hard delete
+
+---
+
+## 8. Monitoring & Observability
+
+### 8.1. Prometheus + Grafana (optional, MVP phase 2)
+
+```yaml
+# docker-compose.yml
+prometheus:
+  image: prom/prometheus
+  volumes:
+    - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+  ports:
+    - "9090:9090"
+
+grafana:
+  image: grafana/grafana
+  ports:
+    - "3030:3000"
+  environment:
+    - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+```
+
+### 8.2. Application metrics (NestJS)
+
+```typescript
+// app.controller.ts
+@Get('health')
+health() {
+  return { status: 'ok', timestamp: new Date() };
+}
+
+@Get('metrics')
+metrics() {
+  // Expose Prometheus metrics (via @nestjs/metrics lub prom-client)
+}
+```
+
+### 8.3. Uptime monitoring (Uptime Kuma optional)
+
+```yaml
+uptimekuma:
+  image: louislam/uptime-kuma:1
+  ports:
+    - "3001:3001"
+  volumes:
+    - ./data/uptime-kuma:/app/data
+```
+
+---
+
+## 9. Plan MVP – Roadmap 4 tygodnie
+
+### Faza 0: Infrastruktura (1–2 dni)
+**Zespół:** DevOps/Informatyk BMS  
+**Zadania:**
+- [ ] Stwórz docker-compose.yml z Postgres HA + EMQX + ThingsBoard + Traefik
+- [ ] Deploy na lokalnym PC (test stack)
+- [ ] Przygotuj kolokację (serwer, firewall, domeny DNS)
+
+**Prompt Claude Code:**
+```
+Stwórz production-ready docker-compose.yml:
+- Postgres 16 HA (pg_auto_failover) z 2 nodami, volumes, backups
+- EMQX 5.6 MQTT broker (ACL config) z TLS
+- ThingsBoard CE (demo data)
+- Traefik v3 (Let's Encrypt, docker labels)
+- Nginx dla frontendu
+Plik .env.example z wszystkimi zmiennymi.
+Test: docker compose up, verify endpoints.
+```
+
+### Faza 1: Backend + ThingsBoard (5–7 dni)
+**Zespół:** Developer (Ty + Claude Code)  
+**Zadania:**
+- [ ] NestJS project (modules: auth, devices, thingsboard, alerts)
+- [ ] ThingsBoard multi-tenant setup (tenants, device types, rules)
+- [ ] Daikin Onecta API integration (polling scheduler)
+- [ ] MQTT publish flow (Daikin → MQTT → TB → Backend webhook)
+- [ ] Test: `/api/devices`, `/api/alerts` endpoints
+
+**Prompts (Plan Mode):**
+```
+1. Explore NestJS architecture dla multi-tenant IoT backend.
+Plan: modules (Auth, ThingsBoard, Devices, Alerts, Integrations).
+2. Implement ThingsBoardService: getDevices(), publishTelemetry(), getAlarms().
+3. Implement DaikinService: OAuth2, polling scheduler, MQTT publish.
+4. Test: Postman collection dla endpoints.
+```
+
+### Faza 2: Frontend (4–5 dni)
+**Zespół:** Developer  
+**Zadania:**
+- [ ] Next.js 15 project (TypeScript)
+- [ ] Pages: Login, ClientDashboard, DeviceDetail
+- [ ] XeokitViewer component (load XKT + telemetry overlay)
+- [ ] API client (axios) + Zustand state
+- [ ] Test: login flow, device list, viewer loads model
+
+**Prompts:**
+```
+1. Create Next.js 15 app (App Router) with Tailwind + shadcn.
+2. Implement XeokitViewer component (load XKT, highlight device, show telemetry panel).
+3. Pages: /dashboard, /device/[id], /alerts.
+4. API client (axios instance, types).
+5. Deploy to Nginx in docker-compose.
+```
+
+### Faza 3: Integracje (3–4 dni)
+**Zespół:** Developer + Informatyk D365 (jeśli dostępny)  
+**Zadania:**
+- [ ] Dataverse OData client (create Cases z alertów)
+- [ ] Power Automate flow (optional: Case → notification)
+- [ ] BMS gateway (Python script dla Modbus)
+- [ ] Test: end-to-end flow (Daikin → alert → Case w D365)
+
+**Prompts:**
+```
+1. Create DataverseService: OData client, createCase(), getCasesByAsset().
+2. Azure AD app registration (env setup).
+3. BMS gateway script (Modbus → MQTT, deployable na RPi).
+4. E2E test: trigger alert → verify Case in Dataverse.
+```
+
+### Faza 4: Dokumentacja & Deployment (1 dzień)
+**Zespół:** DevOps  
+**Zadania:**
+- [ ] CI/CD (GitHub Actions: build → test → deploy)
+- [ ] Dokumentacja API (Swagger auto-gen z NestJS)
+- [ ] Deployment guide (serwer setup, env vars, backup strategy)
+- [ ] Pilot customers (2–3 clients, test data)
+
+**Checklist wdrożenia:**
+- [ ] SSL/HTTPS working (Let's Encrypt)
+- [ ] MQTT TLS configured
+- [ ] DB backups scheduled
+- [ ] Monitoring active (health checks, error logs)
+- [ ] Users created (pilot clients + serwis team)
+
+---
+
+## 10. Koniec-do-końca: Jak to pracuje (user journey)
+
+### Scenario: Alarm temperatura w split Daikin
+
+```
+1. [07:15] Klient kupuje split Daikin u HellCold
+   └─ Instalator: registers device w platformie (name, location, model)
+   └─ Device added to ThingsBoard tenant (client_001)
+
+2. [07:30] Platform starts polling Onecta API
+   └─ Every 3 min: GET Daikin device state
+   └─ MQTT publish: tenant/client_001/device/split_01/telemetry
+
+3. [07:35] Temperature rises: 22→25→28→31°C over 5 min
+   └─ ThingsBoard rule triggered: "temp > 30 for 10 min"
+   └─ Webhook: POST backend/alerts with alert data
+
+4. [07:45] Backend receives alert
+   ├─ Store alert in DB
+   ├─ Call Dataverse: create Case ("High temp", asset=split_01)
+   └─ (Optional) watsonx.ai: analyze anomaly pattern
+
+5. [07:46] Frontend notifies user
+   ├─ ClientDashboard: red indicator (ALARM status)
+   ├─ DeviceDetail page: XeokitViewer highlights device, shows "31°C"
+   └─ Sidebar: linked Case from D365
+
+6. [07:47] Klient przeglądra dokumentację
+   ├─ Click "DTR" → PDF (stored in /models/site_001/)
+   ├─ Click "Case" → opened in D365 (external link)
+
+7. [08:00] HellCold serwis team
+   ├─ Vidzi alert w portalu serwisu (fleet overview)
+   ├─ Przypisuje Case do technika (D365)
+   ├─ Technik jadzie na wizytę
+
+8. [17:30] Technik resolves issue
+   ├─ Updates Case status: "Resolved" w D365
+   ├─ Frontend: Case status zmieniony → notification klienta
+   ├─ Alert marked resolved
+
+9. [23:59] Nightly backup
+   └─ pg_dump → Azure Blob Storage (alerts, telemetry, config)
+```
+
+---
+
+## 11. Rozwój po MVP (roadmap Phase 2+)
+
+- **Watsonx.ai integration:** FDD models na telemetrii (anomaly detection, predictive maintenance)
+- **Point clouds (E57→LAZ→Potree):** synchronizacja 3D model + chmura
+- **Energy analytics:** porównanie COP/SPF, benchmarking między klientami
+- **Mobile app:** React Native dla serwisu (offline mode, push notifications)
+- **Advanced rules engine:** user-defined rules (Python/Groovy) w TB
+- **Integracja z innymi systemami:** SAP (ERP), Maximo (asset mgmt)
+
+---
+
+## 12. Podsumowanie – co dalej?
+
+1. **Zacznij z Phase 0 (infra):** git clone, docker compose up, test stack lokalnie
+2. **Phase 1–4 iteracyjnie** z Claude Code (Plan Mode):
+   - Każdy dzień: 1–2 prompty, 1–2 commits
+   - Weekly: test, review, feedback
+3. **Pilot z 2–3 klientami** po 4 tygodniach
+4. **Iterate na feedback:** dodaj features z Phase 2 based on customer requests
+
+**Kluczowe hasła:**
+- Own-hosted = pełna kontrola + niska latencja
+- ThingsBoard = gotowa multi-tenant IoT base
+- NestJS = szybka, modularny backend do rozwijania
+- Traefik + Let's Encrypt = production-ready hosting
+- Claude Code = accelerator developmentu (prompty do wklejenia)
+
+**Koszty (szacunkowe):**
+- Kolokacja serwer: 150–300 PLN/mies.
+- Azure (opcjonalnie Dynamics API): ~20 USD/mies.
+- Backups (Backblaze B2): ~5 PLN/mies.
+- **Total MVP:** ~200 PLN (~50 USD) /mies.
+
+---
+
+## Appendix A. Environment vars (.env.example)
+
+```env
+# Database
+DB_USER=hvac_user
+DB_PASSWORD=SecurePassword123!
+DATABASE_URL=postgresql://hvac_user:SecurePassword123!@postgres:5432/config
+
+# MQTT & ThingsBoard
+MQTT_BROKER_URL=mqtt://emqx:1883
+MQTT_USER=admin
+MQTT_PASSWORD=SecurePassword123!
+THINGSBOARD_URL=http://thingsboard:8080
+THINGSBOARD_API_USER=tenant@thingsboard.org
+THINGSBOARD_API_PASSWORD=tenant
+
+# JWT & Auth
+JWT_SECRET=YourSecretKeyForJWT
+JWT_EXPIRES_IN=24h
+
+# Daikin Onecta
+DAIKIN_CLIENT_ID=xxx
+DAIKIN_CLIENT_SECRET=yyy
+DAIKIN_REDIRECT_URI=https://api.yourdomain.pl/oauth/daikin/callback
+
+# Dynamics 365 / Dataverse
+D365_ORG_URI=https://yourorg.crm4.dynamics.com
+AZURE_TENANT_ID=xxx
+AZURE_CLIENT_ID=yyy
+AZURE_CLIENT_SECRET=zzz
+
+# Traefik / SSL
+ACME_EMAIL=admin@yourdomain.pl
+CERT_RESOLVER=letsencrypt
+
+# Domains
+API_DOMAIN=api.yourdomain.pl
+APP_DOMAIN=app.yourdomain.pl
+TB_DOMAIN=tb.yourdomain.pl
+
+# Optional: IBM watsonx
+WATSONX_API_URL=https://api.watsonxdata.cloud/...
+WATSONX_API_KEY=xxx
+```
+
+---
+
+## Appendix B. Useful Links & Docs
+
+- **ThingsBoard:** https://thingsboard.io/docs/user-guide/
+- **EMQX:** https://docs.emqx.com/en/emqx/latest/
+- **NestJS:** https://docs.nestjs.com/
+- **Traefik:** https://doc.traefik.io/traefik/
+- **xeokit:** https://xeokit.io/
+- **Daikin Onecta:** https://developer.daikin.eu/ (apply for API key)
+- **Dataverse OData:** https://learn.microsoft.com/en-us/power-apps/developer/data-platform/
+- **Potree:** https://potree.org/
+
+---
+
+**Dokument przygotowany do pracy z Claude Code. Każda faza má konkretne prompty gotowe do wklejenia.**

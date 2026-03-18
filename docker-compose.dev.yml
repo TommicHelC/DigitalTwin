@@ -1,0 +1,53 @@
+# Development overrides — use with:
+# docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+
+  thingsboard:
+    ports:
+      - "8080:9090"
+      - "1883:1883"
+
+  traefik:
+    command:
+      - "--api.insecure=true"
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=hvac-network"
+      - "--providers.file.filename=/dynamic.yml"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--log.level=DEBUG"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8081:8080"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile.dev
+    volumes:
+      - ./backend/src:/app/src
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+    ports:
+      - "3001:3001"
+      - "9229:9229"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    environment:
+      NODE_ENV: development
+    ports:
+      - "3000:3000"
