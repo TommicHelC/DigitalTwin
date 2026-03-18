@@ -895,56 +895,87 @@ export const API_BASE_URL =
 
 ### `src/components/AutodeskViewer/viewerRuntime.ts`
 
+> **Uwaga (commit 26bb6b3):** Zaktualizowane — dodano `viewerInitialized` jako osobną flagę
+> oddzielającą "skrypty załadowane" od "Initializer wywołany". Naprawia podwójne wywołanie
+> `Autodesk.Viewing.Initializer` w React StrictMode oraz przy reinicjalizacji języka.
+> **Skopiuj dosłownie z `autodesk-viewer-react/src/app/components/AutodeskViewer/viewerRuntime.ts`.**
+
 ```typescript
-// Zarządza cyklem życia runtime APS Viewer SDK.
-// SDK jest ładowane z CDN Autodesk przez <script> tag w komponencie.
-// Runtime inicjalizowany jest tylko raz — singleton pattern.
+// Viewer runtime initialization helper
+// Ensures viewer runtime is initialized only once globally
 
-let runtimeInitialized = false
-let initializationPromise: Promise<void> | null = null
+import { ViewerRuntimeOptions } from './types';
+import { getAccessToken } from './helpers';
 
-export function isRuntimeInitialized(): boolean {
-  return runtimeInitialized
+interface RuntimeState {
+  options: ViewerRuntimeOptions | null;
+  ready: Promise<void> | null;
+  scriptsLoaded: boolean;
+  viewerInitialized: boolean;  // ← osobna flaga: Initializer wywołany tylko raz
 }
 
-export function initializeViewerRuntime(
-  getAccessToken: (callback: (token: string, expires: number) => void) => void
-): Promise<void> {
-  if (runtimeInitialized) {
-    return Promise.resolve()
-  }
+const runtime: RuntimeState = {
+  options: null,
+  ready: null,
+  scriptsLoaded: false,
+  viewerInitialized: false,
+};
 
-  if (initializationPromise) {
-    return initializationPromise
-  }
+export function loadViewerScripts(): Promise<void> {
+  if (runtime.scriptsLoaded) return Promise.resolve();
 
-  initializationPromise = new Promise<void>((resolve, reject) => {
-    if (typeof window === 'undefined' || !window.Autodesk) {
-      reject(new Error('Autodesk Viewer SDK not loaded'))
-      return
-    }
+  return new Promise((resolve, reject) => {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.min.css';
+    document.head.appendChild(link);
 
-    // EU region — api: 'streamingV2_EU' jest WYMAGANE dla klientów EU
-    window.Autodesk.Viewing.Initializer(
-      {
-        env: 'AutodeskProduction2',
-        api: 'streamingV2_EU',
-        getAccessToken,
-      },
-      () => {
-        runtimeInitialized = true
-        initializationPromise = null
-        resolve()
+    const script = document.createElement('script');
+    script.src = 'https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.min.js';
+    script.async = true;
+    script.onload = () => { runtime.scriptsLoaded = true; resolve(); };
+    script.onerror = () => reject(new Error('Failed to load Autodesk Viewer scripts'));
+    document.head.appendChild(script);
+  });
+}
+
+export function initializeViewerRuntime(options: ViewerRuntimeOptions = {}): Promise<void> {
+  if (runtime.ready) return runtime.ready;
+
+  runtime.options = {
+    env: 'AutodeskProduction2',
+    api: 'streamingV2_EU',   // EU region — WYMAGANE dla klientów PL/EU
+    getAccessToken,
+    ...options,
+  };
+
+  runtime.ready = loadViewerScripts().then(() => {
+    return new Promise<void>((resolve) => {
+      if (!window.Autodesk?.Viewing) throw new Error('Autodesk Viewing namespace not found');
+
+      // Autodesk.Viewing.Initializer NIE może być wywołany dwa razy
+      // (React StrictMode, reinit języka). Jeśli już wywołany — resolve od razu.
+      if (runtime.viewerInitialized) {
+        resolve();
+        return;
       }
-    )
-  })
 
-  return initializationPromise
+      window.Autodesk.Viewing.Initializer(runtime.options!, () => {
+        runtime.viewerInitialized = true;
+        resolve();
+      });
+    });
+  });
+
+  return runtime.ready;
 }
 
-export function teardownViewerRuntime(): void {
-  runtimeInitialized = false
-  initializationPromise = null
+export function getRuntime(): RuntimeState { return runtime; }
+
+export function resetViewerRuntime(): void {
+  runtime.options = null;
+  runtime.ready = null;
+  // viewerInitialized i scriptsLoaded NIE są resetowane — skrypty i SDK są już w DOM
 }
 ```
 
