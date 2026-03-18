@@ -1,0 +1,15 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Instalujemy zależności w osobnej warstwie (cache)
+COPY package*.json ./
+RUN npm install
+
+# Kod aplikacji jest montowany przez volume w docker-compose.yml
+# dlatego nie kopiujemy src tutaj
+
+EXPOSE 3001
+EXPOSE 9229
+
+CMD ["npm", "run", "start:dev"]
