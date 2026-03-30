@@ -28,9 +28,11 @@ export class AuthService {
    * Zwraca obiekt user bez passwordHash lub null jeśli dane są błędne.
    */
   async validateUser(email: string, password: string): Promise<Omit<UserEntity, 'passwordHash'> | null> {
-    const user = await this.userRepository.findOne({
-      where: { email },
-    });
+    const user = await this.userRepository
+      .createQueryBuilder('u')
+      .addSelect('u.password_hash')
+      .where('u.email = :email', { email })
+      .getOne();
 
     if (!user) {
       this.logger.warn(`Próba logowania na nieistniejące konto: ${email}`);
