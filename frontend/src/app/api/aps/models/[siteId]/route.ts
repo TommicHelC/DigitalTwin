@@ -5,8 +5,9 @@ import { NextRequest, NextResponse } from 'next/server'
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { siteId: string } }
+  { params }: { params: Promise<{ siteId: string }> }
 ) {
+  const { siteId } = await params
   const backendUrl = process.env.BACKEND_URL || 'http://backend:3001'
   const authHeader = request.headers.get('Authorization')
 
@@ -16,7 +17,7 @@ export async function GET(
 
   try {
     const response = await fetch(
-      `${backendUrl}/api/sites/${params.siteId}/models`,
+      `${backendUrl}/api/sites/${siteId}/models`,
       {
         headers: {
           Authorization: authHeader,
