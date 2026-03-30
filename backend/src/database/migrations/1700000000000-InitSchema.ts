@@ -15,6 +15,7 @@ export class InitSchema1700000000000 implements MigrationInterface {
         name            VARCHAR(255) NOT NULL,
         nip             VARCHAR(20),
         contact_email   VARCHAR(255),
+        contact_phone   VARCHAR(50),
         daikin_access_token   TEXT,
         daikin_refresh_token  TEXT,
         daikin_token_expires_at TIMESTAMPTZ,
