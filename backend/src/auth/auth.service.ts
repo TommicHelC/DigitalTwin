@@ -30,7 +30,7 @@ export class AuthService {
   async validateUser(email: string, password: string): Promise<Omit<UserEntity, 'passwordHash'> | null> {
     const user = await this.userRepository
       .createQueryBuilder('u')
-      .addSelect('u.password_hash')
+      .addSelect('u.passwordHash')
       .where('u.email = :email', { email })
       .getOne();
 
