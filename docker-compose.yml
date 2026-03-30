@@ -31,8 +31,6 @@ services:
         condition: service_healthy
     environment:
       TB_QUEUE_TYPE: in-memory
-      INSTALL_TB: "true"
-      LOAD_DEMO: "false"
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/thingsboard
       SPRING_DATASOURCE_USERNAME: ${DB_USER}
       SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD}
