@@ -14,16 +14,14 @@ FROM node:20-alpine AS production
 
 WORKDIR /app
 
-# Kopiujemy tylko package.json żeby zainstalować production deps
 COPY package*.json ./
 RUN npm ci --only=production && npm cache clean --force
 
-# Kopiujemy skompilowane pliki
 COPY --from=builder /app/dist ./dist
+COPY docker/entrypoint.sh ./entrypoint.sh
 
-# Użytkownik non-root
 USER node
 
 EXPOSE 3001
 
-CMD ["node", "dist/main"]
+CMD ["sh", "entrypoint.sh"]

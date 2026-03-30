@@ -10,3 +10,10 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
     CREATE DATABASE thingsboard OWNER "${DB_USER}";
     GRANT ALL PRIVILEGES ON DATABASE thingsboard TO "${DB_USER}";
 EOSQL
+
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "hvac" <<-EOSQL
+    CREATE SCHEMA IF NOT EXISTS config AUTHORIZATION "${DB_USER}";
+    CREATE SCHEMA IF NOT EXISTS telemetry AUTHORIZATION "${DB_USER}";
+    GRANT ALL ON SCHEMA config TO "${DB_USER}";
+    GRANT ALL ON SCHEMA telemetry TO "${DB_USER}";
+EOSQL
