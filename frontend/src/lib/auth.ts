@@ -28,7 +28,13 @@ export function getStoredUser(): User | null {
 export function storeAuthData(data: LoginResponse): void {
   localStorage.setItem(ACCESS_TOKEN_KEY, data.accessToken)
   localStorage.setItem(REFRESH_TOKEN_KEY, data.refreshToken)
-  localStorage.setItem(USER_KEY, JSON.stringify(data.user))
+  try {
+    const payload = JSON.parse(atob(data.accessToken.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')))
+    const user: User = { id: payload.sub, email: payload.email, clientId: payload.clientId ?? null, role: payload.role }
+    localStorage.setItem(USER_KEY, JSON.stringify(user))
+  } catch {
+    // ignore decode errors
+  }
 }
 
 export function clearAuthData(): void {
