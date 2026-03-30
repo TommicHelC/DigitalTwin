@@ -94,7 +94,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: http://192.168.20.231:3001/api/api
+        NEXT_PUBLIC_API_URL: http://192.168.20.231:3001/api
     image: hvac-dt-frontend:latest
     container_name: hvac-frontend
     restart: unless-stopped
