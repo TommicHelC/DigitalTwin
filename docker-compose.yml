@@ -26,10 +26,17 @@ services:
     image: thingsboard/tb-postgres:latest
     container_name: hvac-thingsboard
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       TB_QUEUE_TYPE: in-memory
       INSTALL_TB: "true"
       LOAD_DEMO: "false"
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/thingsboard
+      SPRING_DATASOURCE_USERNAME: ${DB_USER}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD}
+      DATABASE_TS_TYPE: sql
       MQTT_ENABLED: "true"
       MQTT_BIND_ADDRESS: "0.0.0.0"
       MQTT_BIND_PORT: "1883"
