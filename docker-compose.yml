@@ -28,6 +28,8 @@ services:
     restart: unless-stopped
     environment:
       TB_QUEUE_TYPE: in-memory
+      INSTALL_TB: "true"
+      LOAD_DEMO: "false"
       MQTT_ENABLED: "true"
       MQTT_BIND_ADDRESS: "0.0.0.0"
       MQTT_BIND_PORT: "1883"
