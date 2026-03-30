@@ -11,10 +11,8 @@ import type {
   D365Case,
 } from './types'
 
-const API_BASE = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001').replace(/\/+$/, '') + '/api'
-
 const api: AxiosInstance = axios.create({
-  baseURL: API_BASE,
+  baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api',
   headers: {
     'Content-Type': 'application/json',
   },
@@ -76,7 +74,7 @@ api.interceptors.response.use(
 
       try {
         const { data } = await axios.post<{ accessToken: string }>(
-          `${API_BASE}/auth/refresh`,
+          `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001/api'}/auth/refresh`,
           { refreshToken }
         )
         const newToken = data.accessToken
