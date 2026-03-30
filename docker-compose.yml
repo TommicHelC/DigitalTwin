@@ -7,9 +7,11 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD}
       POSTGRES_DB: postgres
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./infra/postgres/init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./infra/postgres/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
     ports:
       - "5432:5432"
     healthcheck:
@@ -44,49 +46,6 @@ services:
       - "1883:1883"
     networks:
       - hvac-network
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.thingsboard.rule=Host(`${TB_DOMAIN}`)"
-      - "traefik.http.routers.thingsboard.entrypoints=websecure"
-      - "traefik.http.routers.thingsboard.tls.certresolver=letsencrypt"
-      - "traefik.http.services.thingsboard.loadbalancer.server.port=9090"
-
-  traefik:
-    image: traefik:v3.3
-    container_name: hvac-traefik
-    restart: unless-stopped
-    command:
-      - "--api.dashboard=true"
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--providers.docker.network=hvac-network"
-      - "--providers.file.filename=/dynamic.yml"
-      - "--entrypoints.web.address=:80"
-      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
-      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
-      - "--entrypoints.websecure.address=:443"
-      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
-      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
-      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
-      - "--certificatesresolvers.letsencrypt.acme.storage=/acme.json"
-      - "--log.level=INFO"
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./infra/traefik/dynamic.yml:/dynamic.yml:ro
-      - ./infra/traefik/acme.json:/acme.json
-    networks:
-      - hvac-network
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.traefik-dashboard.rule=Host(`${TRAEFIK_DOMAIN}`)"
-      - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
-      - "traefik.http.routers.traefik-dashboard.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.traefik-dashboard.service=api@internal"
-      - "traefik.http.routers.traefik-dashboard.middlewares=traefik-auth"
-      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_BASIC_AUTH}"
 
   backend:
     build:
@@ -122,24 +81,17 @@ services:
       AZURE_TENANT_ID: ${AZURE_TENANT_ID}
       AZURE_CLIENT_ID: ${AZURE_CLIENT_ID}
       AZURE_CLIENT_SECRET: ${AZURE_CLIENT_SECRET}
-      FRONTEND_URL: https://${APP_DOMAIN}
+      FRONTEND_URL: http://192.168.20.231:3000
     volumes:
       - documents_storage:/app/documents
+    ports:
+      - "3001:3001"
     networks:
       - hvac-network
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.backend.rule=Host(`${API_DOMAIN}`)"
-      - "traefik.http.routers.backend.entrypoints=websecure"
-      - "traefik.http.routers.backend.tls.certresolver=letsencrypt"
-      - "traefik.http.services.backend.loadbalancer.server.port=3001"
-      - "traefik.http.middlewares.backend-ratelimit.ratelimit.average=100"
-      - "traefik.http.middlewares.backend-ratelimit.ratelimit.burst=50"
-      - "traefik.http.routers.backend.middlewares=backend-ratelimit"
 
   frontend:
     build:
-      context: ./frontend
+      context: ./autodesk-viewer-react
       dockerfile: Dockerfile
     image: hvac-dt-frontend:latest
     container_name: hvac-frontend
@@ -147,19 +99,15 @@ services:
     depends_on:
       - backend
     environment:
-      NEXT_PUBLIC_API_URL: https://${API_DOMAIN}
-      NEXT_PUBLIC_APP_URL: https://${APP_DOMAIN}
+      NEXT_PUBLIC_API_URL: http://192.168.20.231:3001
+      NEXT_PUBLIC_APP_URL: http://192.168.20.231:3000
       AUTODESK_CLIENT_ID: ${AUTODESK_CLIENT_ID}
       AUTODESK_CLIENT_SECRET: ${AUTODESK_CLIENT_SECRET}
       BACKEND_URL: http://backend:3001
+    ports:
+      - "3000:3000"
     networks:
       - hvac-network
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.frontend.rule=Host(`${APP_DOMAIN}`)"
-      - "traefik.http.routers.frontend.entrypoints=websecure"
-      - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
-      - "traefik.http.services.frontend.loadbalancer.server.port=3000"
 
 volumes:
   postgres_data:

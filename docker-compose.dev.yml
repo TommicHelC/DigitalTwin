@@ -42,11 +42,11 @@ services:
 
   frontend:
     build:
-      context: ./frontend
+      context: ./autodesk-viewer-react
       dockerfile: Dockerfile.dev
     volumes:
-      - ./frontend/src:/app/src
-      - ./frontend/public:/app/public
+      - ./autodesk-viewer-react/src:/app/src
+      - ./autodesk-viewer-react/public:/app/public
     environment:
       NODE_ENV: development
     ports:
