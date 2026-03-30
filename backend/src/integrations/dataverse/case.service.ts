@@ -50,7 +50,8 @@ export class CaseService {
     const token = await this.dataverseService.getBearerToken();
     const headers = this.dataverseService.buildHeaders(token);
 
-    const filter = encodeURIComponent(`contains(description,'${daikinDeviceId}')`);
+    const safeDeviceId = daikinDeviceId.replace(/'/g, "''");
+    const filter = encodeURIComponent(`contains(description,'${safeDeviceId}')`);
     const select = 'incidentid,title,statecode,createdon';
     const url = `${this.dataverseService.orgUri}/api/data/v9.2/incidents?$filter=${filter}&$select=${select}`;
 

@@ -6,6 +6,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Device } from './entities/device.entity';
+import { Site } from '../sites/entities/site.entity';
 import { CreateDeviceDto } from './dto/create-device.dto';
 import { UpdateDeviceDto } from './dto/update-device.dto';
 
@@ -14,6 +15,8 @@ export class DevicesService {
   constructor(
     @InjectRepository(Device)
     private readonly deviceRepo: Repository<Device>,
+    @InjectRepository(Site)
+    private readonly siteRepo: Repository<Site>,
   ) {}
 
   async findBySite(siteId: string, clientId: string): Promise<Device[]> {
@@ -49,18 +52,12 @@ export class DevicesService {
   }
 
   async create(dto: CreateDeviceDto, clientId: string, role: string): Promise<Device> {
-    // Sprawdź czy site należy do tego klienta (chyba że admin)
     if (role !== 'admin') {
-      const siteCheck = await this.deviceRepo
-        .createQueryBuilder('d')
-        .select('1')
-        .innerJoin('d.site', 's')
-        .where('s.id = :siteId', { siteId: dto.siteId })
-        .andWhere('s.client_id = :clientId', { clientId })
-        .limit(1)
-        .getRawOne();
-      // Jeśli nie ma żadnego urządzenia dla tego site — sprawdź site bezpośrednio
-      // (może być nowy site bez urządzeń, więc weryfikujemy przez join inaczej)
+      const site = await this.siteRepo.findOne({ where: { id: dto.siteId } });
+      if (!site) throw new NotFoundException(`Site ${dto.siteId} not found`);
+      if (site.clientId !== clientId) {
+        throw new ForbiddenException(`Site ${dto.siteId} does not belong to your account`);
+      }
     }
     const device = this.deviceRepo.create(dto);
     return this.deviceRepo.save(device);
