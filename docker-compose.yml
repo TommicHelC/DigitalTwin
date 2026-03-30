@@ -23,7 +23,7 @@ services:
       - hvac-network
 
   thingsboard:
-    image: thingsboard/tb-ce:latest
+    image: thingsboard/tb-postgres:latest
     container_name: hvac-thingsboard
     restart: unless-stopped
     depends_on:
