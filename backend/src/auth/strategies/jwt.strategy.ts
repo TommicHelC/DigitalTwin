@@ -19,7 +19,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
    * Zwrócony obiekt jest ustawiany jako request.user.
    */
   async validate(payload: JwtPayload) {
-    if (!payload.sub || !payload.email || !payload.clientId) {
+    if (!payload.sub || !payload.email) {
       throw new UnauthorizedException('Nieprawidłowy payload tokenu JWT');
     }
 
